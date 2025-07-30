@@ -1,7 +1,0 @@
-names:
-  0: Transformer
-  1: Circuit Breaker
-  2: Switch
-  3: MV Line
-path: .
-train: train.txt

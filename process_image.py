@@ -4,6 +4,114 @@ import random
 import os
 import glob
 
+def add_lines_avoiding_symbols(image, symbol_masks, num_lines=15, color=(0, 0, 0), thickness=1, max_attempts=100):
+    """
+    Draws random lines on an image, avoiding a list of masked areas for symbols
+    and also avoiding intersecting with other newly drawn lines.
+    """
+    if not symbol_masks:
+        # If there are no symbols, just draw lines anywhere
+        combined_mask = np.zeros(image.shape[:2], dtype=np.uint8)
+    else:
+        # Combine all individual symbol masks into a single mask
+        combined_mask = np.zeros_like(symbol_masks[0])
+        for mask in symbol_masks:
+            combined_mask = cv2.bitwise_or(combined_mask, mask)
+
+    # --- Create a dilation kernel ---
+    # This determines the size of the "keep-out" buffer zone.
+    # A 7x7 kernel creates a 3-pixel buffer, which is very safe.
+    kernel = np.ones((7, 7), np.uint8)
+    
+    # Create the initial keep-out zone by dilating the symbols mask
+    combined_mask = cv2.dilate(combined_mask, kernel, iterations=1)
+
+    h, w = image.shape[:2]
+    lines_drawn = 0
+    attempts = 0
+
+    while lines_drawn < num_lines and attempts < max_attempts * num_lines:
+        attempts += 1
+        
+        x1, y1 = random.randint(0, w - 1), random.randint(0, h - 1)
+        x2, y2 = random.randint(0, w - 1), random.randint(0, h - 1)
+
+        # Create a temporary mask for the line to check for overlap
+        line_check_mask = np.zeros_like(combined_mask)
+        cv2.line(line_check_mask, (x1, y1), (x2, y2), 255, thickness)
+
+        # Create a buffer zone for the PROPOSED line
+        buffered_line_mask = cv2.dilate(line_check_mask, kernel, iterations=1)
+
+        # Check if the line intersects with any symbol
+        if np.any(cv2.bitwise_and(combined_mask, buffered_line_mask)):
+            continue  # Line intersects with a symbol, so we skip it and try again
+
+        # If the line is clear, draw it on the image
+        cv2.line(image, (x1, y1), (x2, y2), color, thickness)
+
+        # Add the new line to the combined mask to avoid future intersections
+        combined_mask = cv2.bitwise_or(combined_mask, buffered_line_mask)
+
+        lines_drawn += 1
+
+    return image, combined_mask
+
+def add_random_text(image, existing_elements_mask, num_texts=5, max_attempts=50):
+    """
+    Adds random text to an image, avoiding existing elements (symbols and lines).
+    """
+    h, w = image.shape[:2]
+    
+    # --- Define text properties ---
+    fonts = [cv2.FONT_HERSHEY_SIMPLEX, cv2.FONT_HERSHEY_PLAIN, cv2.FONT_HERSHEY_DUPLEX]
+    short_texts = ["T1", "CB-A", "SW-42", "FDR-1", "V2", "P-3"]
+    long_texts = ["Substation", "Control", "Phase A", "Auxiliary", "Main Bus", "Feeder"]
+    
+    kernel = np.ones((7, 7), np.uint8)
+    texts_drawn = 0
+    attempts = 0
+    
+    while texts_drawn < num_texts and attempts < max_attempts * num_texts:
+        attempts += 1
+
+        # --- Choose random text properties ---
+        font = random.choice(fonts)
+        font_scale = random.uniform(0.6, 1.2)
+        thickness = random.randint(1, 2)
+        color = (random.randint(0, 50), random.randint(0, 50), random.randint(0, 50))
+        
+        # Randomly choose between short and long text
+        text = random.choice(short_texts if random.random() < 0.5 else long_texts)
+        
+        # Get text size to create a bounding box
+        (text_w, text_h), baseline = cv2.getTextSize(text, font, font_scale, thickness)
+
+        if w - text_w <= 0 or h - text_h <= 0:
+            continue
+        
+        # Find a random origin for the text
+        x = random.randint(0, w - text_w)
+        y = random.randint(text_h, h - baseline) # Ensure text is fully visible
+
+        # Create a mask for the text's bounding box
+        text_mask = np.zeros(image.shape[:2], dtype=np.uint8)
+        cv2.rectangle(text_mask, (x, y - text_h), (x + text_w, y + baseline), 255, -1)
+        
+        # Dilate to create a buffer zone
+        buffered_text_mask = cv2.dilate(text_mask, kernel, iterations=1)
+
+        # Check for overlap with existing elements
+        if np.any(cv2.bitwise_and(existing_elements_mask, buffered_text_mask)):
+            continue
+
+        # Draw the text and update the mask
+        cv2.putText(image, text, (x, y), font, font_scale, color, thickness, cv2.LINE_AA)
+        existing_elements_mask = cv2.bitwise_or(existing_elements_mask, buffered_text_mask)
+        texts_drawn += 1
+
+    return image
+
 def extract_symbols(image_path, label_path):
     """
     Extracts symbols from an image based on YOLO-like segmentation labels,
@@ -74,6 +182,7 @@ def place_symbols_randomly(symbols_with_classes, canvas_size=(1024, 1024), max_a
     """
     canvas = np.ones((canvas_size[1], canvas_size[0], 4), dtype=np.uint8) * 255
     placed_rects = []
+    placed_masks = []
     labels = []
     
     canvas_w, canvas_h = canvas_size
@@ -128,6 +237,12 @@ def place_symbols_randomly(symbols_with_classes, canvas_size=(1024, 1024), max_a
                         alpha * color[:, :, c] + \
                         (1 - alpha) * canvas[rand_y:rand_y+out_h, rand_x:rand_x+out_w, c]
                 
+                # Create and store a full-size mask for the placed symbol
+                symbol_alpha_mask = rotated_symbol[:, :, 3]
+                full_size_symbol_mask = np.zeros((canvas_h, canvas_w), dtype=np.uint8)
+                full_size_symbol_mask[rand_y:rand_y+out_h, rand_x:rand_x+out_w] = symbol_alpha_mask
+                placed_masks.append(full_size_symbol_mask)
+
                 placed_rects.append(new_rect)
                 
                 # --- Generate YOLO OBB Label ---
@@ -161,6 +276,19 @@ def place_symbols_randomly(symbols_with_classes, canvas_size=(1024, 1024), max_a
         if not placed:
             print("Could not place a symbol after max attempts. It might be too large or the canvas too full.")
 
+    # --- Start with a mask of all placed symbols ---
+    if placed_masks:
+        combined_mask = np.zeros_like(placed_masks[0])
+        for mask in placed_masks:
+            combined_mask = cv2.bitwise_or(combined_mask, mask)
+    else:
+        combined_mask = np.zeros((canvas_size[1], canvas_size[0]), dtype=np.uint8)
+
+    line_thickness = random.randint(1, 3)
+    num_lines = random.randint(4, 20)
+    # After placing all symbols, add circuit lines that avoid them
+    canvas, combined_mask = add_lines_avoiding_symbols(canvas, [combined_mask], thickness=line_thickness, num_lines=num_lines)
+    canvas = add_random_text(canvas, combined_mask, num_texts=random.randint(3, 9))
     return canvas, labels
 
 def main():
@@ -182,7 +310,7 @@ def main():
 
     print(f"Extracted {len(all_symbols_with_classes)} base symbols.")
     
-    num_images_to_generate = 5
+    num_images_to_generate = 150
     print(f"Generating {num_images_to_generate} new images with labels...")
 
     # Ensure the output directories exist and are clean

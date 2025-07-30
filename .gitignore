@@ -22,6 +22,9 @@ Thumbs.db
 generated_images/
 generated_labels/
 
+augmented_images/
+yolo_data/
+
 # Logs
 *.log
 
