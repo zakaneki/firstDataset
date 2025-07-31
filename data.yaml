@@ -1,0 +1,8 @@
+names:
+  0: Transformer
+  1: Circuit Breaker
+  2: Switch
+  3: MV Line
+path: ./yolo_data
+train: train.txt
+val: val.txt

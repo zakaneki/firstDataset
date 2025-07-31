@@ -24,6 +24,7 @@ generated_labels/
 
 augmented_images/
 yolo_data/
+runs/
 
 # Logs
 *.log
