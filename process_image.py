@@ -238,7 +238,6 @@ def place_symbols_with_pathfinding(symbols_with_classes, canvas_size=(1024, 1024
                     h, w = grid.shape
                     if (g_start[0] < 0 or g_start[0] >= w or g_start[1] < 0 or g_start[1] >= h or
                         g_goal[0] < 0 or g_goal[0] >= w or g_goal[1] < 0 or g_goal[1] >= h):
-                        print(f"Skipping connection between symbols {i} and {j} because grid coordinates are out of bounds")
                         continue
 
                     # Temporarily clear start and goal positions
@@ -267,7 +266,7 @@ def place_symbols_with_pathfinding(symbols_with_classes, canvas_size=(1024, 1024
                         # Create a mask for the lines being drawn
                         temp_line_mask = np.zeros((canvas_h, canvas_w), dtype=np.uint8)
                         for k in range(len(pts) - 1):
-                            cv2.line(canvas, pts[k], pts[k+1], (0, 0, 255), 2)
+                            cv2.line(canvas, pts[k], pts[k+1], (0, 0, 0), 2)
                             # Also draw on the mask with a thicker line to create buffer
                             cv2.line(temp_line_mask, pts[k], pts[k+1], 255, 4)  # Thicker for buffer
                         
@@ -288,9 +287,6 @@ def place_symbols_with_pathfinding(symbols_with_classes, canvas_size=(1024, 1024
                 
                 if found_path:
                     break
-            
-            if not found_path:
-                print(f"No path found between symbols {i} and {j}")
 
     # Remove unconnected symbols and regenerate canvas
     if connected_symbols:
@@ -680,8 +676,8 @@ def main():
 
     print(f"Found {len(source_image_paths)} source images.")
     
-    # --- Extract symbols from ALL source images ---
-    all_symbols_with_classes = []
+    # --- Extract symbols from ALL source images and organize by class ---
+    symbols_by_class = {}  # Map: class_index -> list of symbols
     original_size = (1024, 1024) # Default size, will be updated by the first image
 
     print("\nExtracting symbols from all source images...")
@@ -696,16 +692,26 @@ def main():
         print(f" - Processing {os.path.basename(image_path)}")
         symbols, size = extract_symbols(image_path, label_path)
         if symbols:
-            all_symbols_with_classes.extend(symbols)
+            # Organize symbols by class
+            for class_index, symbol in symbols:
+                if class_index not in symbols_by_class:
+                    symbols_by_class[class_index] = []
+                symbols_by_class[class_index].append(symbol)
             original_size = size # Use the size from the last processed image
 
-    if not all_symbols_with_classes:
+    if not symbols_by_class:
         print("No symbols were extracted. Exiting.")
         return
 
-    print(f"Extracted {len(all_symbols_with_classes)} base symbols.")
+    # Print symbol distribution
+    print(f"\nExtracted symbols by class:")
+    total_symbols = 0
+    for class_index, symbols in symbols_by_class.items():
+        print(f"  Class {class_index}: {len(symbols)} symbols")
+        total_symbols += len(symbols)
+    print(f"Total symbols: {total_symbols}")
     
-    num_images_to_generate = 20
+    num_images_to_generate = 250
     print(f"Generating {num_images_to_generate} new images with labels...")
 
     # Ensure the output directories exist and are clean
@@ -718,12 +724,35 @@ def main():
 
     for i in range(num_images_to_generate):
         # Determine a random number of symbols to place in the new image
-        num_symbols_to_place = random.randint(5, min(30, len(all_symbols_with_classes))) # Avoid placing too many
-        
-        # Randomly select symbols from the extracted list (with replacement)
-        symbols_for_this_image = random.choices(all_symbols_with_classes, k=num_symbols_to_place)
+        total_symbols_to_place = random.randint(4, 20)      
 
-        print(f"\n--- Creating image {i+1}/{num_images_to_generate} with {num_symbols_to_place} symbols ---")
+        # Get all available class indices
+        available_classes = list(symbols_by_class.keys())
+
+        # Calculate symbols per class (with some randomness for variety)
+        symbols_per_class = {}
+        remaining_symbols = total_symbols_to_place
+
+        # Initialize all class counts to 0
+        for class_index in available_classes:
+            symbols_per_class[class_index] = 0
+
+        # Distribute remaining symbols randomly
+        while remaining_symbols > 0:
+            class_index = random.choice(available_classes)
+            symbols_per_class[class_index] += 1
+            remaining_symbols -= 1
+
+         # Build the symbol list for this image
+        symbols_for_this_image = []
+        for class_index, count in symbols_per_class.items():
+            if count > 0 and symbols_by_class[class_index]:
+                # Randomly select 'count' symbols from this class
+                selected_symbols = random.choices(symbols_by_class[class_index], k=count)
+                for symbol in selected_symbols:
+                    symbols_for_this_image.append((class_index, symbol))
+
+        print(f"\n--- Creating image {i+1}/{num_images_to_generate} with {len(symbols_for_this_image)} symbols ---")
         
         result_image, labels = place_symbols_with_pathfinding(symbols_for_this_image, canvas_size=original_size)
         
