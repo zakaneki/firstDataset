@@ -6,6 +6,7 @@ import numpy as np
 import os
 from ultralytics import YOLO
 import threading
+import easyocr  # Add this import for OCR
 
 class YOLOGUI:
     def __init__(self, root):
@@ -17,6 +18,10 @@ class YOLOGUI:
         self.model = None
         self.model_path = "best.pt"
         self.load_model()
+        
+        # Initialize OCR reader
+        self.ocr_reader = None
+        self.load_ocr()
         
         # Variables
         self.original_image = None
@@ -43,6 +48,15 @@ class YOLOGUI:
                 messagebox.showerror("Error", f"Model file {self.model_path} not found!")
         except Exception as e:
             messagebox.showerror("Error", f"Failed to load model: {str(e)}")
+    
+    def load_ocr(self):
+        """Load the OCR reader"""
+        try:
+            self.ocr_reader = easyocr.Reader(['en'])
+            print("OCR reader loaded successfully")
+        except Exception as e:
+            print(f"Failed to load OCR reader: {str(e)}")
+            messagebox.showwarning("Warning", "OCR not available. Text recognition will be disabled.")
     
     def setup_ui(self):
         """Setup the user interface"""
@@ -90,24 +104,41 @@ class YOLOGUI:
         self.conf_label.grid(row=5, column=0, pady=(0, 20))
         self.conf_scale.configure(command=self.update_conf_label)
         
+        # Search radius parameter
+        ttk.Label(left_panel, text="Text Search Radius (multiplier):").grid(row=6, column=0, pady=(0, 5))
+        self.radius_var = tk.DoubleVar(value=2.0)
+        self.radius_scale = ttk.Scale(left_panel, from_=0.5, to=5.0, 
+                                     variable=self.radius_var, orient="horizontal")
+        self.radius_scale.grid(row=7, column=0, pady=(0, 5))
+        self.radius_label = ttk.Label(left_panel, text="2.0")
+        self.radius_label.grid(row=8, column=0, pady=(0, 20))
+        self.radius_scale.configure(command=self.update_radius_label)
+        
+        # Bounding box toggle
+        self.show_bbox_var = tk.BooleanVar(value=True)
+        self.bbox_toggle = ttk.Checkbutton(left_panel, text="Show Bounding Boxes", 
+                                          variable=self.show_bbox_var, 
+                                          command=self.toggle_bounding_boxes)
+        self.bbox_toggle.grid(row=9, column=0, pady=(0, 20))
+        
         # Legend frame
         legend_frame = ttk.LabelFrame(left_panel, text="Legend of Detected Symbols", padding="5")
-        legend_frame.grid(row=6, column=0, pady=(0, 10), sticky=(tk.W, tk.E))
+        legend_frame.grid(row=10, column=0, pady=(0, 10), sticky=(tk.W, tk.E))
         
         # Legend canvas
         self.legend_canvas = tk.Canvas(legend_frame, width=200, height=150, bg="white", relief="sunken", bd=1)
         self.legend_canvas.grid(row=0, column=0, pady=(5, 0))
         
         # Results info
-        ttk.Label(left_panel, text="Detection Results:", font=("Arial", 12, "bold")).grid(row=7, column=0, pady=(0, 10))
+        ttk.Label(left_panel, text="Detection Results:", font=("Arial", 12, "bold")).grid(row=11, column=0, pady=(0, 10))
         
         # Results text
         self.results_text = tk.Text(left_panel, width=25, height=15, wrap=tk.WORD)
-        self.results_text.grid(row=8, column=0, pady=(0, 10))
+        self.results_text.grid(row=12, column=0, pady=(0, 10))
         
         # Scrollbar for results
         results_scrollbar = ttk.Scrollbar(left_panel, orient="vertical", command=self.results_text.yview)
-        results_scrollbar.grid(row=8, column=1, sticky=(tk.N, tk.S))
+        results_scrollbar.grid(row=12, column=1, sticky=(tk.N, tk.S))
         self.results_text.configure(yscrollcommand=results_scrollbar.set)
         
         # Right panel - Image display
@@ -138,6 +169,10 @@ class YOLOGUI:
     def update_conf_label(self, value):
         """Update confidence label when scale changes"""
         self.conf_label.config(text=f"{float(value):.2f}")
+    
+    def update_radius_label(self, value):
+        """Update radius label when scale changes"""
+        self.radius_label.config(text=f"{float(value):.1f}")
     
     def upload_image(self):
         """Upload and display an image"""
@@ -253,7 +288,14 @@ class YOLOGUI:
             detections = []
             
             if boxes is not None:
-                # Process each detection
+                # First pass: collect all detections for orientation analysis
+                all_detections = []
+                for box in boxes:
+                    xyxyxyxy = box.xyxyxyxy.cpu().numpy()
+                    points = xyxyxyxy.reshape(-1, 2).astype(np.int32)
+                    all_detections.append(points)
+                
+                # Second pass: process each detection with text recognition (without drawing)
                 for box in boxes:
                     # Get OBB coordinates (8 values: x1,y1,x2,y2,x3,y3,x4,y4)
                     xyxyxyxy = box.xyxyxyxy.cpu().numpy()
@@ -265,63 +307,29 @@ class YOLOGUI:
                     # Get class name
                     class_name = self.class_names.get(cls, f"Class {cls}")
                     
-                    # Draw oriented bounding box
-                    color = self._get_class_color(cls)
-                    
                     # Convert to points for drawing
                     points = xyxyxyxy.reshape(-1, 2).astype(np.int32)
-                    cv2.polylines(result_image, [points], True, color, 2)
                     
-                    # Calculate position for confidence label
-                    center_x = int(np.mean(points[:, 0]))
-                    center_y = int(np.mean(points[:, 1]))
-                    
-                    # Find the leftmost and rightmost points of the bounding box
-                    leftmost_x = np.min(points[:, 0])
-                    rightmost_x = np.max(points[:, 0])
-                    
-                    # Draw confidence label
-                    conf_text = f"{conf:.2f}"
-                    conf_size = cv2.getTextSize(conf_text, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 2)[0]
-                    
-                    # Check if text fits on the right side
-                    image_width = result_image.shape[1]
-                    right_space = image_width - rightmost_x - 10
-                    left_space = leftmost_x - 10
-                    
-                    if right_space >= conf_size[0] + 10:  # Enough space on right
-                        # Position label to the right of the detection
-                        conf_x = rightmost_x + 10
-                        conf_y = center_y
-                    else:
-                        # Position label to the left of the detection
-                        conf_x = leftmost_x - conf_size[0] - 10
-                        conf_y = center_y
-                    
-                    # Background rectangle for confidence
-                    conf_bg_x1 = conf_x - 5
-                    conf_bg_y1 = conf_y - conf_size[1] - 5
-                    conf_bg_x2 = conf_x + conf_size[0] + 5
-                    conf_bg_y2 = conf_y + 5
-                    
-                    cv2.rectangle(result_image, (conf_bg_x1, conf_bg_y1), (conf_bg_x2, conf_bg_y2), color, -1)
-                    cv2.rectangle(result_image, (conf_bg_x1, conf_bg_y1), (conf_bg_x2, conf_bg_y2), (255, 255, 255), 1)
-                    cv2.putText(result_image, conf_text, (conf_x, conf_y), 
-                              cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 2)
+                    # Detect text near the element
+                    detected_text = self._detect_text_near_element(result_image, points, class_name)
                     
                     # Add to detections list
                     detections.append({
                         'class': class_name,
                         'confidence': conf,
-                        'bbox': points.tolist()  # Store all 4 corner points
+                        'bbox': points.tolist(),  # Store all 4 corner points
+                        'detected_text': detected_text,
+                        'color': self._get_class_color(cls)
                     })
+            
+            # Store detections for toggle functionality
+            self.current_detections = detections
             
             # Update legend in UI component
             self._update_legend(detections)
             
-            # Display result image
-            self.result_image = result_image
-            self.display_image(result_image)
+            # Draw image with or without bounding boxes
+            self._redraw_image_with_boxes()
             
             # Update results text
             self._update_results_text(detections)
@@ -398,8 +406,6 @@ class YOLOGUI:
             self.results_text.insert(tk.END, "No symbols detected.\n")
             return
         
-        # Sort by confidence
-        detections.sort(key=lambda x: x['confidence'], reverse=True)
         
         self.results_text.insert(tk.END, f"Detected {len(detections)} symbols:\n\n")
         
@@ -407,7 +413,16 @@ class YOLOGUI:
             self.results_text.insert(tk.END, 
                 f"{i}. {det['class']}\n"
                 f"   Confidence: {det['confidence']:.3f}\n"
-                f"   BBox: {det['bbox']}\n\n")
+                f"   BBox: {det['bbox']}\n")
+            
+            if det.get('detected_text'):
+                text_info = det['detected_text']
+                self.results_text.insert(tk.END, 
+                    f"   Detected Text: '{text_info['text']}'\n"
+                    f"   Text Confidence: {text_info['confidence']:.3f}\n"
+                    f"   Text Position: {text_info['region']}\n")
+            
+            self.results_text.insert(tk.END, "\n")
     
     def _handle_detection_error(self, error_msg):
         """Handle detection errors"""
@@ -421,6 +436,7 @@ class YOLOGUI:
         if self.original_image is not None:
             self.display_image(self.original_image)
             self.result_image = None
+            self.current_detections = []
             self.results_text.delete(1.0, tk.END)
             self.legend_canvas.delete("all")
             self.legend_canvas.create_text(100, 75, text="No symbols detected", 
@@ -452,6 +468,283 @@ class YOLOGUI:
         if hasattr(self, 'photo'):
             self.canvas.create_image(new_center_x, new_center_y, anchor="nw", image=self.photo)
         self.canvas.configure(scrollregion=self.canvas.bbox("all"))
+
+    def _detect_element_orientation_from_obb(self, points):
+        """Detect element orientation from YOLO OBB coordinates"""
+        try:
+            # Get the 4 corner points
+            corners = points.reshape(-1, 2)
+            
+            # Calculate all 4 sides of the bounding box
+            sides = []
+            for i in range(4):
+                # Calculate distance between consecutive corners (with wrap-around)
+                side = np.linalg.norm(corners[(i+1) % 4] - corners[i])
+                sides.append(side)
+                        
+            # Find the longest and shortest sides
+            longest_side = max(sides)
+            shortest_side = min(sides)
+                        
+            # Determine orientation based on aspect ratio
+            aspect_ratio = longest_side / shortest_side if shortest_side > 0 else 1
+            
+            # If aspect ratio is significant (>1.5), use it to determine orientation
+            if aspect_ratio > 1.5:
+                # For rectangular elements, the longest side indicates the orientation.
+                # Find the vector of the longest side and determine if it's more vertical or horizontal.
+                longest_side_index = np.argmax(sides)
+                p1 = corners[longest_side_index]
+                p2 = corners[(longest_side_index + 1) % 4]
+                
+                # Calculate the vector of the longest side
+                dx = abs(p2[0] - p1[0])
+                dy = abs(p2[1] - p1[1])
+                
+                # If the change in y is greater than the change in x, it's vertical
+                is_vertical = dy > dx
+            else:
+                # For more square elements, use the overall bounding box
+                min_x, max_x = np.min(corners[:, 0]), np.max(corners[:, 0])
+                min_y, max_y = np.min(corners[:, 1]), np.max(corners[:, 1])
+                width = max_x - min_x
+                height = max_y - min_y
+                is_vertical = height > width            
+            return is_vertical
+            
+        except Exception as e:
+            print(f"Error in OBB orientation detection: {str(e)}")
+            # Fallback to simple aspect ratio
+            min_x, max_x = np.min(points[:, 0]), np.max(points[:, 0])
+            min_y, max_y = np.min(points[:, 1]), np.max(points[:, 1])
+            width = max_x - min_x
+            height = max_y - min_y
+            is_vertical = height > width
+            print(f"OBB fallback: width={width}, height={height}, is_vertical={is_vertical}")
+            return is_vertical
+
+    def _detect_text_near_element(self, image, points, class_name):
+        """Detect text near a detected element"""
+        if self.ocr_reader is None:
+            return None
+        
+        try:
+            # Calculate bounding box of the element
+            x_coords = points[:, 0]
+            y_coords = points[:, 1]
+            min_x, max_x = int(np.min(x_coords)), int(np.max(x_coords))
+            min_y, max_y = int(np.min(y_coords)), int(np.max(y_coords))
+            
+            # Calculate element dimensions
+            width = max_x - min_x
+            height = max_y - min_y
+            
+            # Detect orientation using YOLO OBB results
+            is_vertical = self._detect_element_orientation_from_obb(points)
+                        
+            # Use GUI parameter for search radius
+            search_radius = int(max(width, height) * self.radius_var.get())
+            
+            # Define search regions based on orientation
+            if is_vertical:
+                # For vertical elements, search horizontally on both sides
+                search_regions = [
+                    # Left side
+                    (max(0, min_x - search_radius), min_y - 5,
+                     max_x, max_y + 5),
+                    # Right side
+                    (min_x, min_y - 5,
+                     min(image.shape[1], max_x + search_radius), max_y + 5)
+                ]
+            else:
+                # For horizontal elements, search vertically above and below
+                search_regions = [
+                    # Above
+                    (min_x - 5, max(0, min_y - search_radius),
+                     max_x + 5, max_y),
+                    # Below
+                    (min_x - 5, min_y,
+                     max_x + 5, min(image.shape[0], max_y + search_radius))
+                ]
+            
+            detected_texts = []
+            
+            for region in search_regions:
+                x1, y1, x2, y2 = region
+                
+                # Ensure all coordinates are integers
+                x1, y1, x2, y2 = int(x1), int(y1), int(x2), int(y2)
+                
+                # Extract region from image
+                region_img = image[y1:y2, x1:x2]
+                
+                if region_img.size == 0:
+                    continue
+                
+                # Perform OCR on the region
+                results = self.ocr_reader.readtext(region_img)
+
+                for (bbox, text, confidence) in results:
+                    # Filter text based on confidence and relevance
+                    if confidence > 0.1:  # Adjust confidence threshold as needed
+                    # Check if text is relevant to electrical symbols
+                        text_lower = text.lower()
+                        relevant_keywords = ['transformer', 'breaker', 'switch', 'line', 'bus', 'load', 'gen']
+                        
+                        # Check if text contains relevant keywords or is short (likely a label)
+                        is_relevant = any(keyword in text_lower for keyword in relevant_keywords) or len(text.strip()) <= 10
+                        
+                        if is_relevant:
+                            # Convert bbox coordinates back to original image coordinates
+                            orig_bbox = [
+                                [x1 + int(bbox[0][0]), y1 + int(bbox[0][1])],
+                                [x1 + int(bbox[1][0]), y1 + int(bbox[1][1])],
+                                [x1 + int(bbox[2][0]), y1 + int(bbox[2][1])],
+                                [x1 + int(bbox[3][0]), y1 + int(bbox[3][1])]
+                            ]
+
+                            detected_texts.append({
+                                'text': text.strip(),
+                                'confidence': confidence,
+                                'bbox': orig_bbox,
+                                'region': 'left' if region == search_regions[0] else 'right' if len(search_regions) == 2 else 'above' if region == search_regions[0] else 'below'
+                            })
+
+            # Return the most relevant text based on proximity and confidence
+            if detected_texts:
+                # Calculate the center of the element's bounding box
+                element_center_x = (min_x + max_x) / 2
+                element_center_y = (min_y + max_y) / 2
+
+                best_text = None
+                best_score = -1
+
+                for text_info in detected_texts:
+                    # Calculate the center of the text's bounding box
+                    text_bbox = np.array(text_info['bbox'])
+                    text_center_x = np.mean(text_bbox[:, 0])
+                    text_center_y = np.mean(text_bbox[:, 1])
+                    
+                    # Calculate Euclidean distance
+                    distance = np.sqrt((element_center_x - text_center_x)**2 + (element_center_y - text_center_y)**2)
+                    # Calculate a score that balances confidence and distance
+                    # We want high confidence and low distance.
+                    score = text_info['confidence'] / (1 + distance) # Add 1 to avoid division by zero
+                    
+                    if score > best_score:
+                        best_score = score
+                        best_text = text_info
+
+                return best_text
+            
+            return None
+            
+        except Exception as e:
+            print(f"Error in text detection: {str(e)}")
+            return None
+
+    def toggle_bounding_boxes(self):
+        """Toggle bounding box visibility"""
+        if hasattr(self, 'result_image') and self.result_image is not None:
+            self._redraw_image_with_boxes()
+        elif hasattr(self, 'original_image') and self.original_image is not None:
+            self.display_image(self.original_image)
+    
+    def _redraw_image_with_boxes(self):
+        """Redraw the image with or without bounding boxes based on toggle state"""
+        if not hasattr(self, 'current_detections') or not self.current_detections:
+            return
+        
+        # Start with original image
+        result_image = self.original_image.copy()
+        
+        # Always draw index numbers first (regardless of toggle state)
+        for i, det in enumerate(self.current_detections):
+            points = np.array(det['bbox'], dtype=np.int32)
+            
+            # Draw index number (always visible)
+            index_text = str(i + 1)  # 1-based indexing
+            index_size = cv2.getTextSize(index_text, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 2)[0]
+            
+            # Position index in top-left corner of the bounding box
+            leftmost_x = np.min(points[:, 0])
+            topmost_y = np.min(points[:, 1])
+            
+            # Fixed size circle for index
+            circle_radius = 15  # Fixed radius for all circles
+            
+            # Default position: top-left of the bounding box
+            index_x = leftmost_x - 5
+            index_y = topmost_y - 5
+            
+            # If the top-left position is outside the image frame, move to top-right
+            if index_x - circle_radius < 0 or index_y - circle_radius < 0:
+                rightmost_x = np.max(points[:, 0])
+                index_x = rightmost_x + 5
+                # Check if top-right is also out of bounds, if so, adjust
+                if index_x + circle_radius > result_image.shape[1]:
+                    index_x = result_image.shape[1] - circle_radius - 1
+                if index_y - circle_radius < 0:
+                    index_y = circle_radius + 1
+            
+            cv2.circle(result_image, (index_x, index_y), circle_radius, (0, 0, 0), -1)
+            cv2.circle(result_image, (index_x, index_y), circle_radius, (255, 255, 255), 2)
+            
+            # Draw index number
+            cv2.putText(result_image, index_text, 
+                      (index_x - index_size[0] // 2, index_y + index_size[1] // 2), 
+                      cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
+        
+        # Draw bounding boxes and labels only if toggle is on
+        if self.show_bbox_var.get():
+            for i, det in enumerate(self.current_detections):
+                points = np.array(det['bbox'], dtype=np.int32)
+                color = det['color']
+                conf = det['confidence']
+                
+                # Draw oriented bounding box
+                cv2.polylines(result_image, [points], True, color, 2)
+                
+                # Calculate position for confidence label
+                center_x = int(np.mean(points[:, 0]))
+                center_y = int(np.mean(points[:, 1]))
+                
+                # Find the leftmost and rightmost points of the bounding box
+                leftmost_x = np.min(points[:, 0])
+                rightmost_x = np.max(points[:, 0])
+                
+                # Draw confidence label
+                conf_text = f"{conf:.2f}"
+                conf_size = cv2.getTextSize(conf_text, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 2)[0]
+                
+                # Check if text fits on the right side
+                image_width = result_image.shape[1]
+                right_space = image_width - rightmost_x - 10
+                left_space = leftmost_x - 10
+                
+                if right_space >= conf_size[0] + 10:  # Enough space on right
+                    # Position label to the right of the detection
+                    conf_x = rightmost_x + 10
+                    conf_y = center_y
+                else:
+                    # Position label to the left of the detection
+                    conf_x = leftmost_x - conf_size[0] - 10
+                    conf_y = center_y
+                
+                # Background rectangle for confidence
+                conf_bg_x1 = conf_x - 5
+                conf_bg_y1 = conf_y - conf_size[1] - 5
+                conf_bg_x2 = conf_x + conf_size[0] + 5
+                conf_bg_y2 = conf_y + 5
+                
+                cv2.rectangle(result_image, (conf_bg_x1, conf_bg_y1), (conf_bg_x2, conf_bg_y2), color, -1)
+                cv2.rectangle(result_image, (conf_bg_x1, conf_bg_y1), (conf_bg_x2, conf_bg_y2), (255, 255, 255), 1)
+                cv2.putText(result_image, conf_text, (conf_x, conf_y), 
+                          cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 2)
+        
+        # Display the image
+        self.result_image = result_image
+        self.display_image(result_image)
 
 def main():
     root = tk.Tk()
