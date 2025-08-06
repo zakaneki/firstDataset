@@ -6,7 +6,8 @@ import numpy as np
 import os
 from ultralytics import YOLO
 import threading
-import easyocr  # Add this import for OCR
+import easyocr
+import pytesseract
 
 class YOLOGUI:
     def __init__(self, root):
@@ -527,6 +528,12 @@ class YOLOGUI:
         """Detect text near a detected element"""
         if self.ocr_reader is None:
             return None
+        # try:
+        #     # Check if Tesseract is available
+        #     pytesseract.get_tesseract_version()
+        # except pytesseract.TesseractNotFoundError:
+        #     # Silently fail if tesseract is not found, a warning is shown at startup.
+        #     return None
         
         try:
             # Calculate bounding box of the element
@@ -551,9 +558,9 @@ class YOLOGUI:
                 search_regions = [
                     # Left side
                     (max(0, min_x - search_radius), min_y - 5,
-                     max_x, max_y + 5),
+                     min_x + width // 2, max_y + 5),
                     # Right side
-                    (min_x, min_y - 5,
+                    (min_x + width // 2, min_y - 5,
                      min(image.shape[1], max_x + search_radius), max_y + 5)
                 ]
             else:
@@ -561,15 +568,15 @@ class YOLOGUI:
                 search_regions = [
                     # Above
                     (min_x - 5, max(0, min_y - search_radius),
-                     max_x + 5, max_y),
+                     max_x + 5, min_y + height // 2),
                     # Below
-                    (min_x - 5, min_y,
+                    (min_x - 5, min_y + height // 2,
                      max_x + 5, min(image.shape[0], max_y + search_radius))
                 ]
             
             detected_texts = []
-            
-            for region in search_regions:
+            print(f"Searching for text near element '{class_name}'")
+            for region_idx, region in enumerate(search_regions):
                 x1, y1, x2, y2 = region
                 
                 # Ensure all coordinates are integers
@@ -582,7 +589,9 @@ class YOLOGUI:
                     continue
                 
                 # Perform OCR on the region
-                results = self.ocr_reader.readtext(region_img)
+                results = self.ocr_reader.readtext(region_img, batch_size=4)
+                # results = pytesseract.image_to_data(region_img, output_type=pytesseract.Output.DICT)
+
 
                 for (bbox, text, confidence) in results:
                     # Filter text based on confidence and relevance
@@ -609,6 +618,47 @@ class YOLOGUI:
                                 'bbox': orig_bbox,
                                 'region': 'left' if region == search_regions[0] else 'right' if len(search_regions) == 2 else 'above' if region == search_regions[0] else 'below'
                             })
+                # Filter text based on confidence and relevance
+                # for i in range(len(results['text'])):
+                #     text = results['text'][i].strip()
+                #     confidence = int(results['conf'][i])
+                #     print(f"Detected text: '{text}' with confidence {confidence} in region {region_idx}")
+                #     # Filter text based on confidence and relevance
+                #     if confidence > 10 and text:  # Pytesseract confidence is 0-100
+                #         # Check if text is relevant to electrical symbols
+                #         text_lower = text.lower()
+                #         relevant_keywords = ['transformer', 'breaker', 'switch', 'line', 'bus', 'load', 'gen']
+                        
+                #         # Check if text contains relevant keywords or is short (likely a label)
+                #         is_relevant = any(keyword in text_lower for keyword in relevant_keywords) or len(text) <= 10
+                        
+                #         if is_relevant:
+                #             # Get bounding box from pytesseract results
+                #             w, h = results['width'][i], results['height'][i]
+                #             l, t = results['left'][i], results['top'][i]
+
+                #             # Convert bbox coordinates back to original image coordinates
+                #             orig_bbox = [
+                #                 [x1 + l, y1 + t],
+                #                 [x1 + l + w, y1 + t],
+                #                 [x1 + l + w, y1 + t + h],
+                #                 [x1 + l, y1 + t + h]
+                #             ]
+
+                #             region_name = 'unknown'
+                #             if len(search_regions) == 2:
+                #                 if is_vertical:
+                #                     region_name = 'left' if region_idx == 0 else 'right'
+                #                 else:
+                #                     region_name = 'above' if region_idx == 0 else 'below'
+
+
+                #             detected_texts.append({
+                #                 'text': text,
+                #                 'confidence': confidence / 100.0,  # Normalize to 0-1
+                #                 'bbox': orig_bbox,
+                #                 'region': region_name
+                #             })
 
             # Return the most relevant text based on proximity and confidence
             if detected_texts:
@@ -634,7 +684,7 @@ class YOLOGUI:
                     if score > best_score:
                         best_score = score
                         best_text = text_info
-
+                print(f"Best detected text: '{best_text['text']}' with confidence {best_text['confidence']:.2f} in region {best_text['region']}")
                 return best_text
             
             return None
@@ -657,6 +707,12 @@ class YOLOGUI:
         
         # Start with original image
         result_image = self.original_image.copy()
+
+         # --- Calculate scaling factor based on image size ---
+        img_h, img_w = result_image.shape[:2]
+        scale = max(img_w, img_h) / 800  # 800 is a reference size, adjust as needed
+        thickness = max(2, int(2 * scale))  # Minimum thickness of 2
+        circle_radius = max(12, int(15 * scale))  # Minimum radius of 12
         
         # Always draw index numbers first (regardless of toggle state)
         for i, det in enumerate(self.current_detections):
@@ -664,14 +720,13 @@ class YOLOGUI:
             
             # Draw index number (always visible)
             index_text = str(i + 1)  # 1-based indexing
-            index_size = cv2.getTextSize(index_text, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 2)[0]
+            font_scale = 0.6 * scale
+            font_thickness = max(1, int(3 * scale))
+            index_size = cv2.getTextSize(index_text, cv2.FONT_HERSHEY_SIMPLEX, font_scale, font_thickness)[0]
             
             # Position index in top-left corner of the bounding box
             leftmost_x = np.min(points[:, 0])
             topmost_y = np.min(points[:, 1])
-            
-            # Fixed size circle for index
-            circle_radius = 15  # Fixed radius for all circles
             
             # Default position: top-left of the bounding box
             index_x = leftmost_x - 5
@@ -688,12 +743,12 @@ class YOLOGUI:
                     index_y = circle_radius + 1
             
             cv2.circle(result_image, (index_x, index_y), circle_radius, (0, 0, 0), -1)
-            cv2.circle(result_image, (index_x, index_y), circle_radius, (255, 255, 255), 2)
+            cv2.circle(result_image, (index_x, index_y), circle_radius, (255, 255, 255), thickness)
             
             # Draw index number
-            cv2.putText(result_image, index_text, 
-                      (index_x - index_size[0] // 2, index_y + index_size[1] // 2), 
-                      cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
+            cv2.putText(result_image, index_text,
+                      (index_x - index_size[0] // 2, index_y + index_size[1] // 2),
+                      cv2.FONT_HERSHEY_SIMPLEX, font_scale, (255, 255, 255), font_thickness)
         
         # Draw bounding boxes and labels only if toggle is on
         if self.show_bbox_var.get():
@@ -703,7 +758,7 @@ class YOLOGUI:
                 conf = det['confidence']
                 
                 # Draw oriented bounding box
-                cv2.polylines(result_image, [points], True, color, 2)
+                cv2.polylines(result_image, [points], True, color, thickness)
                 
                 # Calculate position for confidence label
                 center_x = int(np.mean(points[:, 0]))
@@ -715,7 +770,9 @@ class YOLOGUI:
                 
                 # Draw confidence label
                 conf_text = f"{conf:.2f}"
-                conf_size = cv2.getTextSize(conf_text, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 2)[0]
+                conf_font_scale = 0.6 * scale
+                conf_font_thickness = max(1, int(2 * scale))
+                conf_size = cv2.getTextSize(conf_text, cv2.FONT_HERSHEY_SIMPLEX, conf_font_scale, conf_font_thickness)[0]
                 
                 # Check if text fits on the right side
                 image_width = result_image.shape[1]
@@ -738,10 +795,10 @@ class YOLOGUI:
                 conf_bg_y2 = conf_y + 5
                 
                 cv2.rectangle(result_image, (conf_bg_x1, conf_bg_y1), (conf_bg_x2, conf_bg_y2), color, -1)
-                cv2.rectangle(result_image, (conf_bg_x1, conf_bg_y1), (conf_bg_x2, conf_bg_y2), (255, 255, 255), 1)
+                cv2.rectangle(result_image, (conf_bg_x1, conf_bg_y1), (conf_bg_x2, conf_bg_y2), (255, 255, 255), thickness)
                 cv2.putText(result_image, conf_text, (conf_x, conf_y), 
-                          cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 2)
-        
+                          cv2.FONT_HERSHEY_SIMPLEX, conf_font_scale, (255, 255, 255), conf_font_thickness)
+
         # Display the image
         self.result_image = result_image
         self.display_image(result_image)

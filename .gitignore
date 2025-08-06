@@ -35,3 +35,4 @@ random_circuit.png
 *.egg-info/
 dist/
 build/ 
+report.txt
