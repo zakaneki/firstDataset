@@ -6,23 +6,17 @@ import numpy as np
 import os
 from ultralytics import YOLO
 import threading
-import easyocr
-import pytesseract
+from predictor import SymbolPredictor
 
 class YOLOGUI:
     def __init__(self, root):
         self.root = root
         self.root.title("YOLO Electrical Symbol Detector")
         self.root.geometry("1200x800")
-        
-        # Initialize YOLO model
-        self.model = None
-        self.model_path = "best.pt"
-        self.load_model()
-        
-        # Initialize OCR reader
-        self.ocr_reader = None
-        self.load_ocr()
+        self.predictor = SymbolPredictor()
+          
+        # Initialize OCR reader var
+        self.ocr_engine_var = tk.StringVar(value="easyocr")
         
         # Variables
         self.original_image = None
@@ -38,26 +32,6 @@ class YOLOGUI:
         }
         
         self.setup_ui()
-        
-    def load_model(self):
-        """Load the YOLO model"""
-        try:
-            if os.path.exists(self.model_path):
-                self.model = YOLO(self.model_path)
-                print(f"Model loaded successfully from {self.model_path}")
-            else:
-                messagebox.showerror("Error", f"Model file {self.model_path} not found!")
-        except Exception as e:
-            messagebox.showerror("Error", f"Failed to load model: {str(e)}")
-    
-    def load_ocr(self):
-        """Load the OCR reader"""
-        try:
-            self.ocr_reader = easyocr.Reader(['en'])
-            print("OCR reader loaded successfully")
-        except Exception as e:
-            print(f"Failed to load OCR reader: {str(e)}")
-            messagebox.showwarning("Warning", "OCR not available. Text recognition will be disabled.")
     
     def setup_ui(self):
         """Setup the user interface"""
@@ -115,6 +89,11 @@ class YOLOGUI:
         self.radius_label.grid(row=8, column=0, pady=(0, 20))
         self.radius_scale.configure(command=self.update_radius_label)
         
+        # OCR engine selection
+        ttk.Label(left_panel, text="OCR Engine:").grid(row=13, column=0, pady=(0, 5))
+        ocr_combo = ttk.Combobox(left_panel, textvariable=self.ocr_engine_var, values=["easyocr", "doctr"], state="readonly", width=20)
+        ocr_combo.grid(row=14, column=0, pady=(0, 10))
+
         # Bounding box toggle
         self.show_bbox_var = tk.BooleanVar(value=True)
         self.bbox_toggle = ttk.Checkbutton(left_panel, text="Show Bounding Boxes", 
@@ -244,11 +223,7 @@ class YOLOGUI:
         self.canvas.configure(scrollregion=self.canvas.bbox("all"))
     
     def detect_symbols(self):
-        """Run YOLO detection on the uploaded image"""
-        if self.model is None:
-            messagebox.showerror("Error", "Model not loaded!")
-            return
-        
+        """Run YOLO detection on the uploaded image"""     
         if self.original_image is None:
             messagebox.showerror("Error", "Please upload an image first!")
             return
@@ -266,15 +241,10 @@ class YOLOGUI:
     def _run_detection(self):
         """Run detection in background thread"""
         try:
-            # Run YOLO detection
-            results = self.model.predict(self.original_image, conf=self.conf_var.get())
-            
-            # Get the first result
-            result = results[0]
-            
+            # Use SymbolPredictor for detection
+            result = self.predictor.predict(self.original_image, conf=self.conf_var.get())
             # Update GUI in main thread
             self.root.after(0, lambda: self._process_results(result))
-            
         except Exception as e:
             self.root.after(0, lambda: self._handle_detection_error(str(e)))
     
@@ -284,45 +254,63 @@ class YOLOGUI:
             # Create a copy of original image for drawing
             result_image = self.original_image.copy()
             
-            # Get detections
-            boxes = result.obb
-            detections = []
+            # # Get detections
+            # boxes = result.obb
+            # detections = []
             
-            if boxes is not None:
-                # First pass: collect all detections for orientation analysis
-                all_detections = []
-                for box in boxes:
-                    xyxyxyxy = box.xyxyxyxy.cpu().numpy()
-                    points = xyxyxyxy.reshape(-1, 2).astype(np.int32)
-                    all_detections.append(points)
+            # if boxes is not None:
+            #     # First pass: collect all detections for orientation analysis
+            #     all_detections = []
+            #     for box in boxes:
+            #         xyxyxyxy = box.xyxyxyxy.cpu().numpy()
+            #         points = xyxyxyxy.reshape(-1, 2).astype(np.int32)
+            #         all_detections.append(points)
                 
-                # Second pass: process each detection with text recognition (without drawing)
-                for box in boxes:
-                    # Get OBB coordinates (8 values: x1,y1,x2,y2,x3,y3,x4,y4)
-                    xyxyxyxy = box.xyxyxyxy.cpu().numpy()
+            #     # Second pass: process each detection with text recognition (without drawing)
+            #     for box in boxes:
+            #         # Get OBB coordinates (8 values: x1,y1,x2,y2,x3,y3,x4,y4)
+            #         xyxyxyxy = box.xyxyxyxy.cpu().numpy()
                     
-                    # Get class and confidence - extract single elements
-                    cls = int(box.cls.cpu().numpy().item())
-                    conf = float(box.conf.cpu().numpy().item())
+            #         # Get class and confidence - extract single elements
+            #         cls = int(box.cls.cpu().numpy().item())
+            #         conf = float(box.conf.cpu().numpy().item())
                     
-                    # Get class name
-                    class_name = self.class_names.get(cls, f"Class {cls}")
+            #         # Get class name
+            #         class_name = self.class_names.get(cls, f"Class {cls}")
                     
-                    # Convert to points for drawing
-                    points = xyxyxyxy.reshape(-1, 2).astype(np.int32)
+            #         # Convert to points for drawing
+            #         points = xyxyxyxy.reshape(-1, 2).astype(np.int32)
                     
-                    # Detect text near the element
-                    detected_text = self._detect_text_near_element(result_image, points, class_name)
+            #         # Detect text near the element
+            #         detected_text = self._detect_text_near_element(result_image, points, class_name)
                     
-                    # Add to detections list
-                    detections.append({
-                        'class': class_name,
-                        'confidence': conf,
-                        'bbox': points.tolist(),  # Store all 4 corner points
-                        'detected_text': detected_text,
-                        'color': self._get_class_color(cls)
-                    })
+            #         # Add to detections list
+            #         detections.append({
+            #             'class': class_name,
+            #             'confidence': conf,
+            #             'bbox': points.tolist(),  # Store all 4 corner points
+            #             'detected_text': detected_text,
+            #             'color': self._get_class_color(cls)
+            #         })
             
+            # Use SymbolPredictor to parse detections into DetectedElement objects
+            elements = self.predictor.parse_detections(result, self.class_names)
+            detections = []
+
+            for element in elements:
+                # Convert bbox to list for compatibility
+                points = np.array(element.bbox, dtype=np.int32)
+                # Detect text near the element
+                detected_text = self._detect_text_near_element(result_image, points, element.class_name)
+                # Build detection dict for legacy code
+                detections.append({
+                    'class': element.class_name,
+                    'confidence': element.confidence,
+                    'bbox': points.tolist(),
+                    'detected_text': detected_text,
+                    'color': element.color if element.color is not None else self._get_class_color(element.class_id)
+                })
+
             # Store detections for toggle functionality
             self.current_detections = detections
             
@@ -470,227 +458,16 @@ class YOLOGUI:
             self.canvas.create_image(new_center_x, new_center_y, anchor="nw", image=self.photo)
         self.canvas.configure(scrollregion=self.canvas.bbox("all"))
 
-    def _detect_element_orientation_from_obb(self, points):
-        """Detect element orientation from YOLO OBB coordinates"""
-        try:
-            # Get the 4 corner points
-            corners = points.reshape(-1, 2)
-            
-            # Calculate all 4 sides of the bounding box
-            sides = []
-            for i in range(4):
-                # Calculate distance between consecutive corners (with wrap-around)
-                side = np.linalg.norm(corners[(i+1) % 4] - corners[i])
-                sides.append(side)
-                        
-            # Find the longest and shortest sides
-            longest_side = max(sides)
-            shortest_side = min(sides)
-                        
-            # Determine orientation based on aspect ratio
-            aspect_ratio = longest_side / shortest_side if shortest_side > 0 else 1
-            
-            # If aspect ratio is significant (>1.5), use it to determine orientation
-            if aspect_ratio > 1.5:
-                # For rectangular elements, the longest side indicates the orientation.
-                # Find the vector of the longest side and determine if it's more vertical or horizontal.
-                longest_side_index = np.argmax(sides)
-                p1 = corners[longest_side_index]
-                p2 = corners[(longest_side_index + 1) % 4]
-                
-                # Calculate the vector of the longest side
-                dx = abs(p2[0] - p1[0])
-                dy = abs(p2[1] - p1[1])
-                
-                # If the change in y is greater than the change in x, it's vertical
-                is_vertical = dy > dx
-            else:
-                # For more square elements, use the overall bounding box
-                min_x, max_x = np.min(corners[:, 0]), np.max(corners[:, 0])
-                min_y, max_y = np.min(corners[:, 1]), np.max(corners[:, 1])
-                width = max_x - min_x
-                height = max_y - min_y
-                is_vertical = height > width            
-            return is_vertical
-            
-        except Exception as e:
-            print(f"Error in OBB orientation detection: {str(e)}")
-            # Fallback to simple aspect ratio
-            min_x, max_x = np.min(points[:, 0]), np.max(points[:, 0])
-            min_y, max_y = np.min(points[:, 1]), np.max(points[:, 1])
-            width = max_x - min_x
-            height = max_y - min_y
-            is_vertical = height > width
-            print(f"OBB fallback: width={width}, height={height}, is_vertical={is_vertical}")
-            return is_vertical
-
     def _detect_text_near_element(self, image, points, class_name):
         """Detect text near a detected element"""
-        if self.ocr_reader is None:
-            return None
-        # try:
-        #     # Check if Tesseract is available
-        #     pytesseract.get_tesseract_version()
-        # except pytesseract.TesseractNotFoundError:
-        #     # Silently fail if tesseract is not found, a warning is shown at startup.
-        #     return None
-        
-        try:
-            # Calculate bounding box of the element
-            x_coords = points[:, 0]
-            y_coords = points[:, 1]
-            min_x, max_x = int(np.min(x_coords)), int(np.max(x_coords))
-            min_y, max_y = int(np.min(y_coords)), int(np.max(y_coords))
-            
-            # Calculate element dimensions
-            width = max_x - min_x
-            height = max_y - min_y
-            
-            # Detect orientation using YOLO OBB results
-            is_vertical = self._detect_element_orientation_from_obb(points)
-                        
-            # Use GUI parameter for search radius
-            search_radius = int(max(width, height) * self.radius_var.get())
-            
-            # Define search regions based on orientation
-            if is_vertical:
-                # For vertical elements, search horizontally on both sides
-                search_regions = [
-                    # Left side
-                    (max(0, min_x - search_radius), min_y - 5,
-                     min_x + width // 2, max_y + 5),
-                    # Right side
-                    (min_x + width // 2, min_y - 5,
-                     min(image.shape[1], max_x + search_radius), max_y + 5)
-                ]
-            else:
-                # For horizontal elements, search vertically above and below
-                search_regions = [
-                    # Above
-                    (min_x - 5, max(0, min_y - search_radius),
-                     max_x + 5, min_y + height // 2),
-                    # Below
-                    (min_x - 5, min_y + height // 2,
-                     max_x + 5, min(image.shape[0], max_y + search_radius))
-                ]
-            
-            detected_texts = []
-            print(f"Searching for text near element '{class_name}'")
-            for region_idx, region in enumerate(search_regions):
-                x1, y1, x2, y2 = region
-                
-                # Ensure all coordinates are integers
-                x1, y1, x2, y2 = int(x1), int(y1), int(x2), int(y2)
-                
-                # Extract region from image
-                region_img = image[y1:y2, x1:x2]
-                
-                if region_img.size == 0:
-                    continue
-                
-                # Perform OCR on the region
-                results = self.ocr_reader.readtext(region_img, batch_size=4)
-                # results = pytesseract.image_to_data(region_img, output_type=pytesseract.Output.DICT)
-
-
-                for (bbox, text, confidence) in results:
-                    # Filter text based on confidence and relevance
-                    if confidence > 0.1:  # Adjust confidence threshold as needed
-                    # Check if text is relevant to electrical symbols
-                        text_lower = text.lower()
-                        relevant_keywords = ['transformer', 'breaker', 'switch', 'line', 'bus', 'load', 'gen']
-                        
-                        # Check if text contains relevant keywords or is short (likely a label)
-                        is_relevant = any(keyword in text_lower for keyword in relevant_keywords) or len(text.strip()) <= 10
-                        
-                        if is_relevant:
-                            # Convert bbox coordinates back to original image coordinates
-                            orig_bbox = [
-                                [x1 + int(bbox[0][0]), y1 + int(bbox[0][1])],
-                                [x1 + int(bbox[1][0]), y1 + int(bbox[1][1])],
-                                [x1 + int(bbox[2][0]), y1 + int(bbox[2][1])],
-                                [x1 + int(bbox[3][0]), y1 + int(bbox[3][1])]
-                            ]
-
-                            detected_texts.append({
-                                'text': text.strip(),
-                                'confidence': confidence,
-                                'bbox': orig_bbox,
-                                'region': 'left' if region == search_regions[0] else 'right' if len(search_regions) == 2 else 'above' if region == search_regions[0] else 'below'
-                            })
-                # Filter text based on confidence and relevance
-                # for i in range(len(results['text'])):
-                #     text = results['text'][i].strip()
-                #     confidence = int(results['conf'][i])
-                #     print(f"Detected text: '{text}' with confidence {confidence} in region {region_idx}")
-                #     # Filter text based on confidence and relevance
-                #     if confidence > 10 and text:  # Pytesseract confidence is 0-100
-                #         # Check if text is relevant to electrical symbols
-                #         text_lower = text.lower()
-                #         relevant_keywords = ['transformer', 'breaker', 'switch', 'line', 'bus', 'load', 'gen']
-                        
-                #         # Check if text contains relevant keywords or is short (likely a label)
-                #         is_relevant = any(keyword in text_lower for keyword in relevant_keywords) or len(text) <= 10
-                        
-                #         if is_relevant:
-                #             # Get bounding box from pytesseract results
-                #             w, h = results['width'][i], results['height'][i]
-                #             l, t = results['left'][i], results['top'][i]
-
-                #             # Convert bbox coordinates back to original image coordinates
-                #             orig_bbox = [
-                #                 [x1 + l, y1 + t],
-                #                 [x1 + l + w, y1 + t],
-                #                 [x1 + l + w, y1 + t + h],
-                #                 [x1 + l, y1 + t + h]
-                #             ]
-
-                #             region_name = 'unknown'
-                #             if len(search_regions) == 2:
-                #                 if is_vertical:
-                #                     region_name = 'left' if region_idx == 0 else 'right'
-                #                 else:
-                #                     region_name = 'above' if region_idx == 0 else 'below'
-
-
-                #             detected_texts.append({
-                #                 'text': text,
-                #                 'confidence': confidence / 100.0,  # Normalize to 0-1
-                #                 'bbox': orig_bbox,
-                #                 'region': region_name
-                #             })
-
-            # Return the most relevant text based on proximity and confidence
-            if detected_texts:
-                # Calculate the center of the element's bounding box
-                element_center_x = (min_x + max_x) / 2
-                element_center_y = (min_y + max_y) / 2
-
-                best_text = None
-                best_score = -1
-
-                for text_info in detected_texts:
-                    # Calculate the center of the text's bounding box
-                    text_bbox = np.array(text_info['bbox'])
-                    text_center_x = np.mean(text_bbox[:, 0])
-                    text_center_y = np.mean(text_bbox[:, 1])
-                    
-                    # Calculate Euclidean distance
-                    distance = np.sqrt((element_center_x - text_center_x)**2 + (element_center_y - text_center_y)**2)
-                    # Calculate a score that balances confidence and distance
-                    # We want high confidence and low distance.
-                    score = text_info['confidence'] / (1 + distance) # Add 1 to avoid division by zero
-                    
-                    if score > best_score:
-                        best_score = score
-                        best_text = text_info
-                print(f"Best detected text: '{best_text['text']}' with confidence {best_text['confidence']:.2f} in region {best_text['region']}")
-                return best_text
-            
-            return None
-            
-        except Exception as e:
-            print(f"Error in text detection: {str(e)}")
+        ocr_engine = self.ocr_engine_var.get()
+        is_vertical = self.predictor.detect_element_orientation_from_obb(points)
+        radius = self.radius_var.get()
+        if ocr_engine == "easyocr":
+            return self.predictor.detect_text_easyocr(image, points, radius, is_vertical, class_name)
+        elif ocr_engine == "doctr":
+            return self.predictor.detect_text_doctr(image, points, radius, is_vertical, class_name)
+        else:
             return None
 
     def toggle_bounding_boxes(self):
