@@ -254,45 +254,6 @@ class YOLOGUI:
             # Create a copy of original image for drawing
             result_image = self.original_image.copy()
             
-            # # Get detections
-            # boxes = result.obb
-            # detections = []
-            
-            # if boxes is not None:
-            #     # First pass: collect all detections for orientation analysis
-            #     all_detections = []
-            #     for box in boxes:
-            #         xyxyxyxy = box.xyxyxyxy.cpu().numpy()
-            #         points = xyxyxyxy.reshape(-1, 2).astype(np.int32)
-            #         all_detections.append(points)
-                
-            #     # Second pass: process each detection with text recognition (without drawing)
-            #     for box in boxes:
-            #         # Get OBB coordinates (8 values: x1,y1,x2,y2,x3,y3,x4,y4)
-            #         xyxyxyxy = box.xyxyxyxy.cpu().numpy()
-                    
-            #         # Get class and confidence - extract single elements
-            #         cls = int(box.cls.cpu().numpy().item())
-            #         conf = float(box.conf.cpu().numpy().item())
-                    
-            #         # Get class name
-            #         class_name = self.class_names.get(cls, f"Class {cls}")
-                    
-            #         # Convert to points for drawing
-            #         points = xyxyxyxy.reshape(-1, 2).astype(np.int32)
-                    
-            #         # Detect text near the element
-            #         detected_text = self._detect_text_near_element(result_image, points, class_name)
-                    
-            #         # Add to detections list
-            #         detections.append({
-            #             'class': class_name,
-            #             'confidence': conf,
-            #             'bbox': points.tolist(),  # Store all 4 corner points
-            #             'detected_text': detected_text,
-            #             'color': self._get_class_color(cls)
-            #         })
-            
             # Use SymbolPredictor to parse detections into DetectedElement objects
             elements = self.predictor.parse_detections(result, self.class_names)
             detections = []
@@ -313,6 +274,23 @@ class YOLOGUI:
 
             # Store detections for toggle functionality
             self.current_detections = detections
+            self.elements = elements
+
+            # Mask out elements before wire extraction
+            def mask_elements(image, elements, color=(255,255,255)):
+                img = image.copy()
+                for el in elements:
+                    poly = np.array(el.bbox, dtype=np.int32).reshape(-1, 1, 2)
+                    cv2.fillPoly(img, [poly], color)
+                return img
+
+            # Usage:
+            masked_img = mask_elements(self.original_image, elements)
+
+            # Extract wires and compute connectivity
+            self.wire_polylines = self.predictor.extract_wires(masked_img)
+            self.connections = self.predictor.compute_connectivity_via_graph(self.elements, self.wire_polylines, max(self.original_image.shape[:2]))
+           # self.connections = self.predictor.compute_connectivity(elements, self.wire_polylines)
             
             # Update legend in UI component
             self._update_legend(detections)
@@ -322,6 +300,15 @@ class YOLOGUI:
             
             # Update results text
             self._update_results_text(detections)
+
+            # Append connectivity summary
+            self.results_text.insert(tk.END, f"Connections: {len(self.connections)}\n")
+            for e in self.connections:
+                a = e['a']; b = e['b']
+                self.results_text.insert(
+                    tk.END,
+                    f" - {a+1}:{elements[a].class_name}  <->  {b+1}:{elements[b].class_name}\n"
+                )
             
             # Re-enable buttons
             self.detect_btn.config(state="normal")
@@ -575,6 +562,41 @@ class YOLOGUI:
                 cv2.rectangle(result_image, (conf_bg_x1, conf_bg_y1), (conf_bg_x2, conf_bg_y2), (255, 255, 255), thickness)
                 cv2.putText(result_image, conf_text, (conf_x, conf_y), 
                           cv2.FONT_HERSHEY_SIMPLEX, conf_font_scale, (255, 255, 255), conf_font_thickness)
+
+        # Draw wires (polylines)
+        if hasattr(self, 'wire_polylines') and self.wire_polylines:
+            wire_thick = int(4 * scale)
+            # Generate a color palette for wires
+            def get_palette(n):
+                # HSV evenly spaced, then convert to RGB
+                palette = []
+                for i in range(n):
+                    hsv = np.array([i / n, 1.0, 1.0])
+                    rgb = tuple(int(c * 255) for c in cv2.cvtColor(np.uint8([[hsv * [180,255,255]]]), cv2.COLOR_HSV2BGR)[0,0])
+                    palette.append(rgb)
+                return palette
+            wire_colors = get_palette(len(self.wire_polylines))
+            for idx, poly in enumerate(self.wire_polylines):
+                color = wire_colors[idx]
+                cv2.polylines(result_image, [poly], False, color, wire_thick, lineType=cv2.LINE_AA)
+
+
+            # --- Draw intersections ---
+            if hasattr(self.predictor, 'intersections') and self.predictor.intersections:
+                for pt in self.predictor.intersections:
+                    cv2.circle(result_image, (int(pt[0]), int(pt[1])), int(5 * scale), (0, 0, 0), -1)
+                    cv2.circle(result_image, (int(pt[0]), int(pt[1])), int(3 * scale), (0, 255, 255), -1)
+                    cv2.circle(result_image, (int(pt[0]), int(pt[1])), int(2 * scale), (255, 255, 255), -1)
+
+            # Highlight connected elements pairs
+            if hasattr(self, 'connections') and self.connections:
+                conn_color = (0, 255, 255)  # cyan
+                for e in self.connections:
+                    a = np.array(self.current_detections[e['a']]['bbox'], dtype=np.int32)
+                    b = np.array(self.current_detections[e['b']]['bbox'], dtype=np.int32)
+                    ca = (int(a[:,0].mean()), int(a[:,1].mean()))
+                    cb = (int(b[:,0].mean()), int(b[:,1].mean()))
+                    cv2.line(result_image, ca, cb, conn_color, max(1, int(1 * scale)), cv2.LINE_AA)
 
         # Display the image
         self.result_image = result_image

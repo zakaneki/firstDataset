@@ -1,3 +1,4 @@
+import random
 import cv2
 import numpy as np
 import os
@@ -7,6 +8,7 @@ from doctr.io import DocumentFile
 import tempfile
 from ultralytics import YOLO
 from elements import DetectedElement, Transformer, CircuitBreaker, Switch, MVLine
+import math
 
 class SymbolPredictor:
     def __init__(self, model_path="best.pt"):
@@ -53,21 +55,21 @@ class SymbolPredictor:
                 # For vertical elements, search horizontally on both sides
                 search_regions = [
                     # Left side
-                    (max(0, min_x - search_radius), min_y - 5,
-                    min_x + width // 2, max_y + 5),
+                    (max(0, min_x - search_radius), min_y - 10,
+                    min_x + width // 2, max_y + 10  ),
                     # Right side
-                    (min_x + width // 2, min_y - 5,
-                    min(image.shape[1], max_x + search_radius), max_y + 5)
+                    (min_x + width // 2, min_y - 10,
+                    min(image.shape[1], max_x + search_radius), max_y + 10)
                 ]
             else:
                 # For horizontal elements, search vertically above and below
                 search_regions = [
                     # Above
-                    (min_x - 5, max(0, min_y - search_radius),
-                    max_x + 5, min_y + height // 2),
+                    (min_x - 10, max(0, min_y - search_radius),
+                    max_x + 10, min_y + height // 2),
                     # Below
-                    (min_x - 5, min_y + height // 2,
-                    max_x + 5, min(image.shape[0], max_y + search_radius))
+                    (min_x - 10, min_y + height // 2,
+                    max_x + 10, min(image.shape[0], max_y + search_radius))
                 ]
             
             detected_texts = []
@@ -335,3 +337,359 @@ class SymbolPredictor:
                     element = DetectedElement(cls, class_name, points, conf)
                 detections.append(element)
         return detections
+    
+    def extract_wires(self, image):
+        """Extract wire polylines from the image using edge + Hough segments, then merge into polylines."""
+        img = image.copy()
+        if img.ndim == 3 and img.shape[2] == 3:
+            gray = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY)
+        else:
+            gray = img
+
+        bw = cv2.adaptiveThreshold(
+            gray, 255, cv2.ADAPTIVE_THRESH_MEAN_C, cv2.THRESH_BINARY, 15, 10
+        )
+
+        min_len = int(0.01833 * max(img.shape[:2]) + 3)
+
+        segs = None
+
+        # Prefer LSD
+        lsd = None
+        try:
+            lsd = cv2.createLineSegmentDetector(cv2.LSD_REFINE_ADV, 1)
+        except Exception:
+            lsd = None
+
+        if lsd is not None:
+            lines, _width, _prec, _nfa = lsd.detect(bw)
+            # img_vis = bw.copy()
+
+            # if lines is not None:
+            #     for l in lines:
+            #         x1, y1, x2, y2 = map(int, l[0])
+            #         color = tuple(random.randint(0, 255) for _ in range(3))
+            #         cv2.line(img_vis, (x1, y1), (x2, y2), color, 5)
+            #     cv2.imwrite("lsd_raw_lines.png", img_vis)
+            if lines is not None:
+                # lines: Nx1x4 -> (x1,y1,x2,y2)
+                segs_lsd = []
+                for l in lines:
+                    x1, y1, x2, y2 = map(float, l[0])
+                    if math.hypot(x2 - x1, y2 - y1) >= min_len:
+                        segs_lsd.append((int(round(x1)), int(round(y1)), int(round(x2)), int(round(y2))))
+                if segs_lsd:
+                    segs = segs_lsd
+
+        # Fallback to Canny + Hough if LSD unavailable or empty
+        if segs is None:
+            thr = cv2.adaptiveThreshold(gray, 255, cv2.ADAPTIVE_THRESH_MEAN_,
+                                        cv2.THRESH_BINARY_INV, 15, 10)
+            kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
+            thr = cv2.morphologyEx(thr, cv2.MORPH_OPEN, kernel, iterations=1)
+            edges = cv2.Canny(thr, 50, 150)
+            lines = cv2.HoughLinesP(edges, 1, np.pi / 180, threshold=30,
+                                    minLineLength=min_len, maxLineGap=10)
+            if lines is None:
+                return []
+            segs = [tuple(map(int, l[0])) for l in lines]
+
+        # Merge segments (graph-based, supports branching)
+        segs = self.merge_segments_iterative(segs, int(0.00667 * max(img.shape[:2]) + 8.33))
+        polylines = [np.array([[x1, y1], [x2, y2]], dtype=np.int32) for (x1, y1, x2, y2) in segs]
+        return polylines
+    
+    def merge_segments_iterative(self, segs, dist_thresh=35, angle_thresh_deg=5):
+        """
+        Merge collinear/parallel and overlapping/adjacent segments (horizontal/vertical only).
+        Handles subset/overlap cases robustly.
+        """
+        def seg_angle(s):
+            x1, y1, x2, y2 = s
+            return math.degrees(math.atan2(y2 - y1, x2 - x1))
+
+        def is_horiz(s):
+            a = seg_angle(s)
+            return abs(a) < angle_thresh_deg or abs(a - 180) < angle_thresh_deg or abs(a + 180) < angle_thresh_deg
+
+        def is_vert(s):
+            a = seg_angle(s)
+            return abs(abs(a) - 90) < angle_thresh_deg
+
+        def merge_axis_aligned(s1, s2):
+            # Assumes both are horizontal or both are vertical
+            if is_horiz(s1):
+                y = int(round((s1[1] + s1[3] + s2[1] + s2[3]) / 4))
+                xs = [s1[0], s1[2], s2[0], s2[2]]
+                return (min(xs), y, max(xs), y)
+            else:
+                x = int(round((s1[0] + s1[2] + s2[0] + s2[2]) / 4))
+                ys = [s1[1], s1[3], s2[1], s2[3]]
+                return (x, min(ys), x, max(ys))
+
+        def overlap_1d(a1, a2, b1, b2, tol):
+            # Returns True if [a1,a2] and [b1,b2] overlap or touch within tol
+            a1, a2 = sorted([a1, a2])
+            b1, b2 = sorted([b1, b2])
+            return not (a2 < b1 - tol or b2 < a1 - tol)
+
+        segs = list(segs)
+        merged = True
+        while merged:
+            merged = False
+            used = [False] * len(segs)
+            new_segs = []
+            i = 0
+            while i < len(segs):
+                if used[i]:
+                    i += 1
+                    continue
+                s1 = segs[i]
+                found = False
+                for j in range(i + 1, len(segs)):
+                    if used[j]:
+                        continue
+                    s2 = segs[j]
+                    # Both horizontal
+                    if is_horiz(s1) and is_horiz(s2):
+                        # y must be close
+                        y1 = (s1[1] + s1[3]) / 2
+                        y2 = (s2[1] + s2[3]) / 2
+                        if abs(y1 - y2) < dist_thresh:
+                            # x projections must overlap/touch
+                            if overlap_1d(s1[0], s1[2], s2[0], s2[2], dist_thresh):
+                                merged_seg = merge_axis_aligned(s1, s2)
+                                used[i] = used[j] = True
+                                new_segs.append(merged_seg)
+                                merged = True
+                                found = True
+                                break
+                    # Both vertical
+                    elif is_vert(s1) and is_vert(s2):
+                        x1 = (s1[0] + s1[2]) / 2
+                        x2 = (s2[0] + s2[2]) / 2
+                        if abs(x1 - x2) < dist_thresh:
+                            if overlap_1d(s1[1], s1[3], s2[1], s2[3], dist_thresh):
+                                merged_seg = merge_axis_aligned(s1, s2)
+                                used[i] = used[j] = True
+                                new_segs.append(merged_seg)
+                                merged = True
+                                found = True
+                                break
+                if not found:
+                    new_segs.append(s1)
+                    used[i] = True
+                i += 1
+            segs = new_segs
+        return segs
+
+    def find_intersections(self, segs, max_dim, thresh=20):
+        """
+        Find all intersection points between segments.
+        If an intersection is near an existing one (within thresh), reuse that point.
+        Also returns: dict {intersection_idx: [segment_idx, ...]}
+        Returns: (list of (x, y) intersection points, mapping dict)
+        """
+        def seg_intersect(a1, a2, b1, b2, eps = 10):
+            # Returns intersection point if segments (a1,a2) and (b1,b2) cross, else None
+            x1, y1 = a1
+            x2, y2 = a2
+            x3, y3 = b1
+            x4, y4 = b2
+            denom = (x1-x2)*(y3-y4) - (y1-y2)*(x3-x4)
+            if abs(denom) < 1e-8:
+                return None  # Parallel or coincident
+            px = ((x1*y2 - y1*x2)*(x3-x4) - (x1-x2)*(x3*y4 - y3*x4)) / denom
+            py = ((x1*y2 - y1*x2)*(y3-y4) - (y1-y2)*(x3*y4 - y3*x4)) / denom
+
+            # Check if intersection is within both segments
+            def on_seg(xa, ya, xb, yb, xp, yp):
+                return min(xa, xb)-eps <= xp <= max(xa, xb)+eps and min(ya, yb)-eps<= yp <= max(ya, yb)+eps
+            
+            if on_seg(x1, y1, x2, y2, px, py) and on_seg(x3, y3, x4, y4, px, py):
+                return (int(round(px)), int(round(py)))
+            return None
+
+        intersections = []
+        mapping = {}
+        for i, s1 in enumerate(segs):
+            a1 = (s1[0], s1[1])
+            a2 = (s1[2], s1[3])
+            for j in range(i+1, len(segs)):
+                s2 = segs[j]
+                b1 = (s2[0], s2[1])
+                b2 = (s2[2], s2[3])
+                pt = seg_intersect(a1, a2, b1, b2, int(0.005 * max_dim + 5))
+                if pt is not None:
+                    # Check if close to existing intersection
+                    found = False
+                    idx = None
+                    for k, existing in enumerate(intersections):
+                        if np.hypot(existing[0]-pt[0], existing[1]-pt[1]) < thresh:
+                            # Use existing
+                            pt = existing
+                            found = True
+                            idx = k
+                            break
+                    if not found:
+                        intersections.append(pt)
+                        idx = len(intersections) - 1
+                    # Add both segments to the mapping for this intersection
+                    mapping.setdefault(idx, set()).update([i, j])
+        # Convert sets to lists for consistency
+        mapping = {k: list(v) for k, v in mapping.items()}
+        self.intersections = intersections
+        return intersections, mapping
+    
+    @staticmethod
+    def build_intersection_graph(intersections, mapping, segs):
+        """
+        Returns: adjacency dict {intersection_idx: set(neighbor_intersection_idx)}
+        and segment_to_intersections {segment_idx: [int_idx1, int_idx2]}
+        """
+        adj = {i: set() for i in range(len(intersections))}
+        segment_to_intersections = {}
+        for int_idx, seg_idxs in mapping.items():
+            for seg_idx in seg_idxs:
+                # For each segment, find all intersections it touches
+                if seg_idx not in segment_to_intersections:
+                    segment_to_intersections[seg_idx] = []
+                segment_to_intersections[seg_idx].append(int_idx)
+        # Now, for each segment that touches two intersections, connect those intersections
+        for seg_idx, int_idxs in segment_to_intersections.items():
+            if len(int_idxs) < 2:
+                continue
+            # Sort intersection points along the segment
+            x1, y1, x2, y2 = segs[seg_idx]
+            p1 = np.array([x1, y1])
+            p2 = np.array([x2, y2])
+            seg_vec = p2 - p1
+            seg_len = np.linalg.norm(seg_vec)
+            if seg_len < 1e-6:
+                continue
+            # Project intersection points onto the segment
+            def proj_param(pt):
+                pt = np.array(pt)
+                return np.dot(pt - p1, seg_vec) / (seg_len ** 2)
+            int_idxs_sorted = sorted(int_idxs, key=lambda idx: proj_param(intersections[idx]))
+            # Connect consecutive intersections
+            for a, b in zip(int_idxs_sorted, int_idxs_sorted[1:]):
+                adj[a].add(b)
+                adj[b].add(a)
+        return adj, segment_to_intersections
+    
+    @staticmethod
+    def map_elements_to_intersections(elements, segs, segment_to_intersections, thresh=50):
+        """
+        Returns: dict {element_idx: [intersection_idx, ...]}
+        For each element, finds all segments that touch it, then all intersections on those segments.
+        """
+        mapping = {i: set() for i in range(len(elements))}
+        for el_idx, el in enumerate(elements):
+            poly = np.array(el.bbox, dtype=np.int32).reshape(-1, 2)
+            for seg_idx, (x1, y1, x2, y2) in enumerate(segs):
+                # Check if segment touches element (using endpoints or segment-edge distance)
+                p1, p2 = (x1, y1), (x2, y2)
+                # Use cv2.pointPolygonTest for endpoints
+                d1 = cv2.pointPolygonTest(poly.reshape(-1, 1, 2), p1, measureDist=True)
+                d2 = cv2.pointPolygonTest(poly.reshape(-1, 1, 2), p2, measureDist=True)
+                if (d1 is not None and d1 >= -thresh) or (d2 is not None and d2 >= -thresh):
+                    # Add all intersections on this segment
+                    for int_idx in segment_to_intersections.get(seg_idx, []):
+                        mapping[el_idx].add(int_idx)
+                else:
+                    # Also check if segment crosses the polygon (element)
+                    for i in range(len(poly)):
+                        q1 = tuple(poly[i])
+                        q2 = tuple(poly[(i+1) % len(poly)])
+                        if segments_intersect(p1, p2, q1, q2):
+                            for int_idx in segment_to_intersections.get(seg_idx, []):
+                                mapping[el_idx].add(int_idx)
+                            break
+        # Convert sets to lists
+        mapping = {k: list(v) for k, v in mapping.items()}
+        return mapping
+
+    @staticmethod
+    def find_element_connections(adj, element_to_ints):
+        """
+        Returns: list of (element_a_idx, element_b_idx) pairs that are connected via the wire graph.
+        """
+        # For each element, BFS from its intersections to find other elements
+        connections = set()
+        for a_idx, ints_a in element_to_ints.items():
+            visited = set()
+            queue = list(ints_a)
+            while queue:
+                cur = queue.pop(0)
+                visited.add(cur)
+                # Check if any other element touches this intersection
+                for b_idx, ints_b in element_to_ints.items():
+                    if b_idx != a_idx and any(i == cur for i in ints_b):
+                        # Found a connection
+                        connections.add(tuple(sorted((a_idx, b_idx))))
+                # Traverse to neighbors
+                for nb in adj[cur]:
+                    if nb not in visited:
+                        queue.append(nb)
+        return connections
+    
+    @staticmethod
+    def find_direct_element_connections(elements, segs, thresh=50):
+        """
+        Returns: set of (element_a_idx, element_b_idx) pairs directly connected by a segment.
+        """
+        direct_pairs = set()
+        polys = [np.array(el.bbox, dtype=np.int32).reshape(-1, 2) for el in elements]
+        for seg_idx, (x1, y1, x2, y2) in enumerate(segs):
+            p1, p2 = (x1, y1), (x2, y2)
+            touched = []
+            for e_idx, poly in enumerate(polys):
+                # Use cv2.pointPolygonTest for endpoints
+                d1 = cv2.pointPolygonTest(poly.reshape(-1, 1, 2), p1, measureDist=True)
+                d2 = cv2.pointPolygonTest(poly.reshape(-1, 1, 2), p2, measureDist=True)
+                if (d1 is not None and d1 >= -thresh) or (d2 is not None and d2 >= -thresh):
+                    touched.append(e_idx)
+                else:
+                    # Also check if segment crosses the polygon (element)
+                    for i in range(len(poly)):
+                        q1 = tuple(poly[i])
+                        q2 = tuple(poly[(i+1) % len(poly)])
+                        if segments_intersect(p1, p2, q1, q2):
+                            touched.append(e_idx)
+                            break
+            # If two different elements are touched by this segment, connect them
+            if len(touched) >= 2:
+                for i in range(len(touched)):
+                    for j in range(i+1, len(touched)):
+                        a, b = touched[i], touched[j]
+                        if a != b:
+                            direct_pairs.add(tuple(sorted((a, b))))
+        return direct_pairs
+
+    def compute_connectivity_via_graph(self, elements, polylines, max_dim, int_thresh=10, touch_thresh=50):
+        """
+        Convenience wrapper that uses the intersection graph pipeline and returns edges like compute_connectivity.
+        """
+        # Convert polylines to simple segments (two endpoints)
+        segs = []
+        for poly in polylines:
+            p = np.asarray(poly).reshape(-1, 2)
+            if len(p) >= 2:
+                x1, y1 = map(int, p[0])
+                x2, y2 = map(int, p[-1])
+                segs.append((x1, y1, x2, y2))
+
+        intersections, intersection_to_segments = self.find_intersections(segs, max_dim, thresh=int_thresh)
+        adj, seg_to_ints = self.build_intersection_graph(intersections, intersection_to_segments, segs)
+        el_to_ints = self.map_elements_to_intersections(elements, segs, seg_to_ints, thresh=touch_thresh)
+        pairs_graph = self.find_element_connections(adj, el_to_ints)
+        pairs_direct = self.find_direct_element_connections(elements, segs, thresh=touch_thresh)
+        all_pairs = pairs_graph | pairs_direct
+        return [{'a': a, 'b': b, 'polyline_idx': None} for a, b in all_pairs]
+
+def segments_intersect(p1, p2, q1, q2):
+    """Returns True if segments (p1,p2) and (q1,q2) intersect."""
+    def ccw(a, b, c):
+        return (c[1]-a[1]) * (b[0]-a[0]) > (b[1]-a[1]) * (c[0]-a[0])
+    return (ccw(p1, q1, q2) != ccw(p2, q1, q2)) and (ccw(p1, p2, q1) != ccw(p1, p2, q2))
