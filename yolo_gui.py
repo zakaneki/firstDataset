@@ -4,9 +4,12 @@ from PIL import Image, ImageTk
 import cv2
 import numpy as np
 import os
-from ultralytics import YOLO
 import threading
 from predictor import SymbolPredictor
+from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+import matplotlib.pyplot as plt
+import networkx as nx
+import random
 
 class YOLOGUI:
     def __init__(self, root):
@@ -35,9 +38,19 @@ class YOLOGUI:
     
     def setup_ui(self):
         """Setup the user interface"""
-        # Main frame
-        main_frame = ttk.Frame(self.root, padding="10")
-        main_frame.grid(row=0, column=0, sticky=(tk.W, tk.E, tk.N, tk.S))
+
+        # Create a notebook (tab control)
+        self.notebook = ttk.Notebook(self.root)
+        self.notebook.grid(row=0, column=0, sticky=(tk.W, tk.E, tk.N, tk.S))
+
+        # Main frame (existing UI)
+        main_frame = ttk.Frame(self.notebook, padding="10")
+        self.notebook.add(main_frame, text="Detection")
+
+        # Graph frame (new tab)
+        self.graph_frame = ttk.Frame(self.notebook, padding="10")
+        self.notebook.add(self.graph_frame, text="Graph Analysis")
+
         
         # Configure grid weights
         self.root.columnconfigure(0, weight=1)
@@ -145,7 +158,9 @@ class YOLOGUI:
         self.status_var = tk.StringVar(value="Ready")
         status_bar = ttk.Label(main_frame, textvariable=self.status_var, relief="sunken")
         status_bar.grid(row=2, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=(10, 0))
-        
+
+        self.setup_graph_tab()
+
     def update_conf_label(self, value):
         """Update confidence label when scale changes"""
         self.conf_label.config(text=f"{float(value):.2f}")
@@ -263,6 +278,7 @@ class YOLOGUI:
                 points = np.array(element.bbox, dtype=np.int32)
                 # Detect text near the element
                 detected_text = self._detect_text_near_element(result_image, points, element.class_name)
+                element.text = detected_text.get('text') if detected_text else ""
                 # Build detection dict for legacy code
                 detections.append({
                     'class': element.class_name,
@@ -290,7 +306,7 @@ class YOLOGUI:
             # Extract wires and compute connectivity
             self.wire_polylines = self.predictor.extract_wires(masked_img)
             self.connections = self.predictor.compute_connectivity_via_graph(self.elements, self.wire_polylines, max(self.original_image.shape[:2]))
-           # self.connections = self.predictor.compute_connectivity(elements, self.wire_polylines)
+            self.draw_graph()
             
             # Update legend in UI component
             self._update_legend(detections)
@@ -566,18 +582,8 @@ class YOLOGUI:
         # Draw wires (polylines)
         if hasattr(self, 'wire_polylines') and self.wire_polylines:
             wire_thick = int(4 * scale)
-            # Generate a color palette for wires
-            def get_palette(n):
-                # HSV evenly spaced, then convert to RGB
-                palette = []
-                for i in range(n):
-                    hsv = np.array([i / n, 1.0, 1.0])
-                    rgb = tuple(int(c * 255) for c in cv2.cvtColor(np.uint8([[hsv * [180,255,255]]]), cv2.COLOR_HSV2BGR)[0,0])
-                    palette.append(rgb)
-                return palette
-            wire_colors = get_palette(len(self.wire_polylines))
-            for idx, poly in enumerate(self.wire_polylines):
-                color = wire_colors[idx]
+            for poly in self.wire_polylines:
+                color = tuple(random.randint(0, 255) for _ in range(3))
                 cv2.polylines(result_image, [poly], False, color, wire_thick, lineType=cv2.LINE_AA)
 
 
@@ -602,9 +608,40 @@ class YOLOGUI:
         self.result_image = result_image
         self.display_image(result_image)
 
+    def setup_graph_tab(self):
+        # Create a matplotlib figure for the graph
+        self.graph_fig, self.graph_ax = plt.subplots(figsize=(6, 6))
+        self.graph_canvas = FigureCanvasTkAgg(self.graph_fig, master=self.graph_frame)
+        self.graph_canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
+
+    def draw_graph(self):
+        # Build a NetworkX graph from your connectivity data
+        G = nx.Graph()
+        if hasattr(self, 'connections') and self.connections:
+            for e in self.connections:
+                a = e['a']
+                b = e['b']
+                G.add_edge(a, b)
+        # Optionally add node labels
+        labels = {
+            i: (self.elements[i].text if self.elements[i].text != "" else self.elements[i].class_name)
+            for i in range(len(self.elements))
+        }
+        self.graph_ax.clear()
+        pos = nx.spring_layout(G)
+        nx.draw(G, pos, ax=self.graph_ax, with_labels=True, labels=labels, node_color='skyblue', edge_color='gray')
+        self.graph_canvas.draw()
+
+import sys
 def main():
     root = tk.Tk()
     app = YOLOGUI(root)
+
+    def on_close():
+        root.quit()
+        root.destroy()
+        sys.exit(0)
+    root.protocol("WM_DELETE_WINDOW", on_close)
     root.mainloop()
 
 if __name__ == "__main__":
