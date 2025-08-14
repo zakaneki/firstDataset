@@ -615,7 +615,7 @@ class YOLOGUI:
         self.graph_canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
 
     def draw_graph(self):
-        # Build a NetworkX graph from your connectivity data
+        # Build a NetworkX graph from connectivity data
         G = nx.Graph()
         if hasattr(self, 'connections') and self.connections:
             for e in self.connections:
@@ -627,9 +627,31 @@ class YOLOGUI:
             i: (self.elements[i].text if self.elements[i].text != "" else self.elements[i].class_name)
             for i in range(len(self.elements))
         }
+
+        # Compute positions from element bounding boxes (center of bbox)
+        pos = {}
+        elements = getattr(self, 'elements', [])
+        if elements:
+            for i, el in enumerate(elements):
+                poly = np.array(el.bbox, dtype=np.float32).reshape(-1, 2)
+                cx = float(poly[:, 0].mean())
+                cy = float(poly[:, 1].mean())
+                pos[i] = (cx, cy)
+
         self.graph_ax.clear()
-        pos = nx.spring_layout(G)
-        nx.draw(G, pos, ax=self.graph_ax, with_labels=True, labels=labels, node_color='skyblue', edge_color='gray')
+        if pos:
+            xs = [p[0] for p in pos.values()]
+            ys = [p[1] for p in pos.values()]
+            xmin, xmax = min(xs) - 20, max(xs) + 20
+            ymin, ymax = min(ys) - 20, max(ys) + 20
+            self.graph_ax.set_xlim(xmin, xmax)
+            self.graph_ax.set_ylim(ymax, ymin)
+            nx.draw_networkx_edges(G, pos, ax=self.graph_ax, edge_color='gray', width=1.5)
+            nx.draw_networkx_nodes(G, pos, ax=self.graph_ax, node_color='cyan', node_size=160)
+            nx.draw_networkx_labels(G, pos, labels=labels, ax=self.graph_ax, font_size=8)
+
+
+        self.graph_ax.axis('off')
         self.graph_canvas.draw()
 
 import sys

@@ -47,7 +47,7 @@ class SymbolPredictor:
             width = max_x - min_x
             height = max_y - min_y
                         
-            # Use GUI parameter for search radius
+
             search_radius = int(max(width, height) * radius)
             
             # Define search regions based on orientation
@@ -77,7 +77,6 @@ class SymbolPredictor:
             for region_idx, region in enumerate(search_regions):
                 x1, y1, x2, y2 = region
                 
-                # Ensure all coordinates are integers
                 x1, y1, x2, y2 = int(x1), int(y1), int(x2), int(y2)
                 
                 # Extract region from image
@@ -88,17 +87,14 @@ class SymbolPredictor:
                 
                 # Perform OCR on the region
                 results = self.ocr_reader.readtext(region_img, batch_size=4)
-                # results = pytesseract.image_to_data(region_img, output_type=pytesseract.Output.DICT)
 
                 relevant_keywords = ['transformer', 'breaker', 'switch', 'line', 'bus', 'load', 'gen']
                 for (bbox, text, confidence) in results:
                     # Filter text based on confidence and relevance
-                    if confidence > 0.1:  # Adjust confidence threshold as needed
-                    # Check if text is relevant to electrical symbols
+                    if confidence > 0.1:
+                        # Check if text is relevant to electrical symbols
                         text_lower = text.lower()
-                        
-                        
-                        # Check if text contains relevant keywords or is short (likely a label)
+                                            
                         is_relevant = any(keyword in text_lower for keyword in relevant_keywords) or len(text.strip()) <= 10
                         
                         if is_relevant:
@@ -116,7 +112,8 @@ class SymbolPredictor:
                                 'bbox': orig_bbox,
                                 'region': 'left' if region == search_regions[0] else 'right' if len(search_regions) == 2 else 'above' if region == search_regions[0] else 'below'
                             })
-                        # Return the most relevant text based on proximity and confidence
+                            
+            # Return the most relevant text based on proximity and confidence
             if detected_texts:
                 # Calculate the center of the element's bounding box
                 element_center_x = (min_x + max_x) / 2

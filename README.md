@@ -1,6 +1,7 @@
 # Electrical Symbol Detection with YOLO OBB
 
-This project trains a YOLO v11 OBB (Oriented Bounding Box) model to detect electrical symbols in circuit diagrams. The model can identify 4 types of electrical components: Transformers, Circuit Breakers, Switches, and MV Lines.
+This project detects electrical symbols in circuit diagrams and extracts connectivity (wires, junctions, element connections). It includes a simple GUI for running detection, visualizing results, and analyzing the connectivity graph.
+
 
 ## Project Overview
 
@@ -11,23 +12,25 @@ This project trains a YOLO v11 OBB (Oriented Bounding Box) model to detect elect
 
 ## 📁 Project Structure
 ```
-firstDataset/
-├── README.md
-├── data.yaml                 # Dataset configuration
-├── best.pt                   # Trained model weights
-├── process_image.py          # Image generation script
-├── augment_images.py         # Image augmentation script
+circuit-vision/
+├── augmented_images/         # Augmented images
 ├── images/                   # Source images
+├── generated_images/         # Generated training images
+├── generated_labels/         # Generated training labels
 │   ├── frame_0_delay-0.01s.jpg
 │   ├── single-line-diagram-substation-two-parallel-transformers.png
 │   └── substation-with-single-transformer.png
 ├── labels/                   # Source labels (YOLO OBB format)
 │   └── train/
-├── generated_images/         # Generated training images
-├── generated_labels/         # Generated training labels
-├── augmented_images/         # Augmented images
-├── runs/                     # Training outputs
-└── test/                     # Test images
+├── augment_images.py         # Image augmentation script
+├── best.pt                   # Trained model weights
+├── data.yaml                 # Dataset configuration
+├── elements.py               # Defines DetectedElement and symbol classes (Transformer, CircuitBreaker, etc.)
+├── predictor.py              # SymbolPredictor: runs YOLO OBB detection, OCR, wire extraction, and connectivity analysis
+├── prepare_yolo_data.py      # Prepares and formats data for YOLO OBB training
+├── process_image.py          # Generates synthetic circuit images and YOLO OBB labels
+├── yolo_gui.py               # Tkinter GUI for detection, visualization, and connectivity graph analysis
+├── README.md
 ```
 
 ##  Quick Start
@@ -73,6 +76,21 @@ yolo obb predict model=runs/train/electrical_obb_v1/weights/best.pt source=test_
 # Predict with confidence threshold
 yolo obb predict model=runs/train/electrical_obb_v1/weights/best.pt source=test_image.png conf=0.5
 ```
+
+### 5. Launch the GUI for Detection & Analysis
+
+```bash
+python yolo_gui.py
+```
+
+- Use the GUI to upload images, run detection, and visualize results.
+- Switch to the "Graph Analysis" tab to view and analyze the connectivity graph of detected elements and wires.
+
+
+### 6. Experiment with OCR and Connectivity
+
+- Try both EasyOCR and Doctr for text extraction (configurable in the GUI).
+- Adjust detection and OCR parameters for best results on your data.
 
 ##  Training Details
 
@@ -162,6 +180,12 @@ Edit `process_image.py`:
 - Adjust symbol placement parameters
 - Modify line drawing settings
 
+### Customize the GUI (`yolo_gui.py`)
+- Change default OCR engine or add new OCR options.
+- Adjust GUI layout, add new tabs, or modify result visualization.
+- Update connectivity graph analysis or export features.
+- Integrate additional post-processing or reporting tools.
+
 ## 🔍 Troubleshooting
 
 ### Common Issues
@@ -189,6 +213,12 @@ Edit `process_image.py`:
    rm runs/val/*/val.cache
    ```
 
+5. **GUI Issues**
+   - If the GUI does not launch, ensure all dependencies (Tkinter, PIL, matplotlib, networkx) are installed.
+   - For OCR errors, check that EasyOCR and Doctr are installed and properly configured.
+   - If detection is slow in the GUI, try reducing image size.
+
+
 ## 📝 Requirements
 
 - Python 3.8+
@@ -196,6 +226,12 @@ Edit `process_image.py`:
 - Ultralytics YOLO
 - OpenCV
 - NumPy
+- Tkinter
+- Pillow (PIL)
+- matplotlib
+- networkx
+- EasyOCR
+- Doctr
 
 ##  Contributing
 

@@ -3,7 +3,7 @@ import albumentations as A
 import os
 import shutil
 
-# Define your augmentation pipeline
+# Define augmentation pipeline
 transform = A.Compose([
     A.RandomBrightnessContrast(brightness_limit=0.2, contrast_limit=0.2, p=0.5),
     A.HueSaturationValue(hue_shift_limit=20, sat_shift_limit=30, val_shift_limit=20, p=0.5),
@@ -25,7 +25,7 @@ os.makedirs(output_dir, exist_ok=True)
 image_files = [f for f in os.listdir(input_dir) if f.endswith(('.png', '.jpg', '.jpeg'))]
 
 # Loop through each image and apply augmentations
-num_augmentations = 3  # Number of augmentations per image
+num_augmentations = 3  
 
 for image_file in image_files:
     image_path = os.path.join(input_dir, image_file)
